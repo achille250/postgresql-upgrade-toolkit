@@ -1,0 +1,102 @@
+PostgreSQL 15 → PostgreSQL 17 Upgrade Guide (Using pg_upgrade)
+1. Install Requirements
+sudo apt update
+sudo apt install -y wget ca-certificates
+
+2. Add PostgreSQL 17 Official APT Repository
+2.1 Import GPG key
+wget --quiet -O - https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+  | sudo tee /etc/apt/trusted.gpg.d/postgresql.asc
+
+2.2 Add repository
+echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
+  | sudo tee /etc/apt/sources.list.d/pgdg.list
+sudo apt update
+
+3. Install PostgreSQL 17
+sudo apt install -y postgresql-17 postgresql-client-17 postgresql-contrib-17
+
+4. Prepare PostgreSQL 17 Data Directory
+mkdir /u01/postgres17
+chown postgres:postgres /u01/postgres17
+chmod 700 /u01/postgres17
+
+Initialize 17 cluster
+sudo -u postgres /usr/lib/postgresql/17/bin/initdb -D /u01/postgres17
+
+Start then stop it (required before pg_upgrade)
+sudo -u postgres /usr/lib/postgresql/17/bin/pg_ctl -D /u01/postgres17 -l logfile start
+sudo -u postgres /usr/lib/postgresql/17/bin/pg_ctl -D /u01/postgres17 -l logfile stop
+
+5. Stop PostgreSQL 15
+sudo -u postgres /usr/lib/postgresql/15/bin/pg_ctl -D /u01/postgres15 -l logfile stop
+
+
+Make sure PostgreSQL 15 is fully stopped.
+
+6. Run the Upgrade (Corrected for PG 15 → PG 17)
+
+✔️ Your old cluster = PostgreSQL 15
+✔️ Your new cluster = PostgreSQL 17
+
+sudo -u postgres /usr/lib/postgresql/17/bin/pg_upgrade \
+  --old-datadir /u01/postgres15 \
+  --new-datadir /u01/postgres17 \
+  --old-bindir /usr/lib/postgresql/15/bin \
+  --new-bindir /usr/lib/postgresql/17/bin
+
+Expected Output (Success)
+Upgrade Complete
+----------------
+Optimizer statistics are not transferred by pg_upgrade so,
+once you start the new server, consider running:
+    ./analyze_new_cluster.sh
+
+Running this script will delete the old cluster's data files:
+    ./delete_old_cluster.sh
+
+7. Post-Upgrade Steps
+7.1 Start PostgreSQL 17
+sudo -u postgres /usr/lib/postgresql/17/bin/pg_ctl -D /u01/postgres17 -l logfile start
+
+7.2 Analyze the new cluster
+./analyze_new_cluster.sh
+
+
+If the script does not exist:
+
+sudo -u postgres /usr/lib/postgresql/17/bin/vacuumdb --all --analyze-only
+
+8. Tune PostgreSQL 17 for Performance
+
+Use:
+
+🔗 https://pgtune.leopard.in.ua/
+
+Select:
+
+PostgreSQL 17
+
+Your RAM
+
+Your CPU cores
+
+Your workload (OLTP/OLAP/etc.)
+
+Then apply the recommended settings using:
+
+sudo -u postgres /usr/lib/postgresql/17/bin/pg_ctl -D /u01/postgres17 reload
+
+
+Or to persist via ALTER SYSTEM:
+
+ALTER SYSTEM SET shared_buffers = '...';
+ALTER SYSTEM SET work_mem = '...';
+ALTER SYSTEM SET maintenance_work_mem = '...';
+ALTER SYSTEM SET effective_cache_size = '...';
+
+9. Optional: Delete old PostgreSQL 15 data
+
+Only after verifying everything works:
+
+./delete_old_cluster.sh

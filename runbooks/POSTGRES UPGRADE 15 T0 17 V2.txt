@@ -1,0 +1,275 @@
+#!/usr/bin/env bash
+
+###############################################################################
+# PostgreSQL 15 → PostgreSQL 17 Automated Upgrade Script (Production Grade)
+#
+# WHAT THIS SCRIPT DOES:
+#
+# 1. Ensures PostgreSQL 15 is running
+# 2. Extracts all non-default tuned PostgreSQL 15 parameters
+# 3. Performs a full physical backup using pg_basebackup
+# 4. Installs PostgreSQL 17 binaries
+# 5. Stops PostgreSQL services cleanly
+# 6. Initializes PostgreSQL 17 data directory
+# 7. Runs pg_upgrade (check + fast link mode)
+# 8. Creates log and WAL archive directories
+# 9. Configures PostgreSQL 17 service to use new data directory
+# 10. Starts PostgreSQL 17 via systemd
+# 11. Applies:
+#     - Migrated tuning parameters
+#     - Log directory
+#     - WAL archiving
+# 12. Validates configuration paths
+# 13. Verifies WAL and replication status
+# 14. Runs performance sanity checks
+# 15. Executes ANALYZE and VACUUM FREEZE
+#
+# DIRECTORY LAYOUT:
+#   Data     → /u01/postgres17
+#   Config   → /etc/postgresql/17/main/
+#   Logs     → /u02/postgres17_log
+#   Archive  → /u02/postgres17_archive
+#
+# SAFETY:
+#   - Pre-upgrade backup
+#   - Compatibility check
+#   - Safe parameter migration
+#   - Health verification
+#
+# ROLLBACK:
+#   systemctl stop postgresql@17-main
+#   systemctl start postgresql@15-main
+#
+###############################################################################
+
+set -e
+
+# =========================
+# CONFIGURATION
+# =========================
+
+OLD_VERSION=15
+NEW_VERSION=17
+
+OLD_DATADIR="/u01/postgres15"
+NEW_DATADIR="/u01/postgres17"
+
+OLD_BINDIR="/usr/lib/postgresql/15/bin"
+NEW_BINDIR="/usr/lib/postgresql/17/bin"
+
+CONF_DIR="/etc/postgresql/17/main"
+
+LOG_DIR="/u02/postgres17_log"
+ARCHIVE_DIR="/u02/postgres17_archive"
+
+BACKUP_DIR="/u02/basebackups"
+BACKUP_USER="backup_user"
+
+SETTINGS_DUMP="/tmp/pg15_custom_settings.conf"
+
+# =========================
+# HELPER FUNCTIONS
+# =========================
+info(){ echo -e "\e[34m[INFO]\e[0m $*"; }
+ok(){ echo -e "\e[32m[OK]\e[0m $*"; }
+err(){ echo -e "\e[31m[ERROR]\e[0m $*"; exit 1; }
+
+[[ $EUID -eq 0 ]] || err "Run as root"
+
+# =====================================================
+# STEP 1 - ENSURE PG15 RUNNING
+# =====================================================
+info "Ensuring PostgreSQL 15 is running..."
+
+sudo -u postgres "$OLD_BINDIR/pg_ctl" -D "$OLD_DATADIR" start >/dev/null 2>&1 || true
+
+# =====================================================
+# STEP 2 - CAPTURE CUSTOM SETTINGS
+# =====================================================
+info "Extracting non-default settings from PG15..."
+
+sudo -u postgres $OLD_BINDIR/psql -At <<EOF > "$SETTINGS_DUMP"
+SELECT name || ' = ' || quote_literal(setting)
+FROM pg_settings
+WHERE setting <> boot_val
+AND source IN ('configuration file','override','command line')
+ORDER BY name;
+EOF
+
+ok "Settings extracted"
+
+# =====================================================
+# STEP 3 - BACKUP
+# =====================================================
+info "Creating backup..."
+
+TIMESTAMP=$(date +%F-%H%M)
+BACKUP_PATH="$BACKUP_DIR/$TIMESTAMP"
+
+mkdir -p "$BACKUP_DIR"
+chown postgres:postgres "$BACKUP_DIR"
+
+sudo -u postgres "$OLD_BINDIR/pg_basebackup" \
+ -D "$BACKUP_PATH" -U "$BACKUP_USER" -X stream -Ft -P -v
+
+ok "Backup complete"
+
+# =====================================================
+# STEP 4 - INSTALL PG17
+# =====================================================
+info "Installing PostgreSQL 17..."
+
+apt-get update -y >/dev/null
+apt-get install -y postgresql-17 postgresql-client-17 postgresql-contrib-17 >/dev/null
+
+# =====================================================
+# STEP 5 - STOP SERVICES
+# =====================================================
+systemctl stop postgresql@15-main || true
+systemctl stop postgresql@17-main || true
+
+# =====================================================
+# STEP 6 - INIT NEW DATA DIRECTORY
+# =====================================================
+info "Initializing new data directory..."
+
+mkdir -p "$NEW_DATADIR"
+chown postgres:postgres "$NEW_DATADIR"
+chmod 700 "$NEW_DATADIR"
+
+sudo -u postgres "$NEW_BINDIR/initdb" -D "$NEW_DATADIR" >/dev/null
+
+# =====================================================
+# STEP 7 - PG_UPGRADE
+# =====================================================
+UPGRADE_DIR="/tmp/pg_upgrade_${OLD_VERSION}_to_${NEW_VERSION}"
+mkdir -p "$UPGRADE_DIR"
+chown postgres:postgres "$UPGRADE_DIR"
+cd "$UPGRADE_DIR"
+
+sudo -u postgres "$NEW_BINDIR/pg_upgrade" \
+ --old-datadir "$OLD_DATADIR" \
+ --new-datadir "$NEW_DATADIR" \
+ --old-bindir "$OLD_BINDIR" \
+ --new-bindir "$NEW_BINDIR" \
+ --check
+
+sudo -u postgres "$NEW_BINDIR/pg_upgrade" \
+ --old-datadir "$OLD_DATADIR" \
+ --new-datadir "$NEW_DATADIR" \
+ --old-bindir "$OLD_BINDIR" \
+ --new-bindir "$NEW_BINDIR" \
+ --link
+
+ok "Upgrade finished"
+
+# =====================================================
+# STEP 8 - PREPARE LOG & ARCHIVE DIRECTORIES
+# =====================================================
+info "Creating log and WAL archive directories..."
+
+mkdir -p "$LOG_DIR" "$ARCHIVE_DIR"
+chown postgres:postgres "$LOG_DIR" "$ARCHIVE_DIR"
+chmod 700 "$LOG_DIR" "$ARCHIVE_DIR"
+
+# =====================================================
+# STEP 9 - CONFIGURE SERVICE DATA DIRECTORY
+# =====================================================
+info "Configuring PostgreSQL 17 service..."
+
+echo "data_directory = '$NEW_DATADIR'" > "$CONF_DIR/postgresql.auto.conf"
+chown postgres:postgres "$CONF_DIR/postgresql.auto.conf"
+chmod 600 "$CONF_DIR/postgresql.auto.conf"
+
+# =====================================================
+# STEP 10 - START SERVICE
+# =====================================================
+info "Starting PostgreSQL 17 service"
+
+systemctl start postgresql@17-main
+systemctl enable postgresql@17-main
+sleep 3
+
+# =====================================================
+# STEP 11 - APPLY DIRECTORY & ARCHIVE SETTINGS
+# =====================================================
+sudo -u postgres psql <<EOF
+ALTER SYSTEM SET log_directory = '$LOG_DIR';
+ALTER SYSTEM SET archive_mode = 'on';
+ALTER SYSTEM SET archive_command = 'test ! -f $ARCHIVE_DIR/%f && cp %p $ARCHIVE_DIR/%f';
+EOF
+
+systemctl restart postgresql@17-main
+
+# =====================================================
+# STEP 12 - RESTORE CUSTOM SETTINGS
+# =====================================================
+info "Restoring tuned parameters..."
+
+while read line; do
+ PARAM=$(echo "$line" | cut -d= -f1 | xargs)
+
+ EXISTS=$(sudo -u postgres psql -At -c \
+  "SELECT 1 FROM pg_settings WHERE name='$PARAM';")
+
+ [[ "$EXISTS" == "1" ]] && sudo -u postgres psql -c "ALTER SYSTEM SET $line;" >/dev/null || \
+  echo "Skipped $PARAM"
+
+done < "$SETTINGS_DUMP"
+
+systemctl restart postgresql@17-main
+
+# =====================================================
+# STEP 13 - CONFIG PATH VALIDATION
+# =====================================================
+sudo -u postgres psql -c "
+SHOW data_directory;
+SHOW config_file;
+SHOW hba_file;
+SHOW log_directory;
+"
+
+# =====================================================
+# STEP 14 - WAL & REPLICATION HEALTH
+# =====================================================
+sudo -u postgres psql -c "
+SELECT pg_is_in_recovery();
+SELECT * FROM pg_stat_replication;
+SELECT pg_current_wal_lsn();
+"
+
+# =====================================================
+# STEP 15 - PERFORMANCE SANITY
+# =====================================================
+sudo -u postgres psql -c "
+SELECT name, setting FROM pg_settings
+WHERE name IN (
+ 'shared_buffers','work_mem',
+ 'maintenance_work_mem','max_connections','wal_buffers'
+);
+"
+
+sudo -u postgres psql -c "
+SELECT datname, numbackends, blks_hit, blks_read
+FROM pg_stat_database;
+"
+
+# =====================================================
+# STEP 16 - MAINTENANCE
+# =====================================================
+sudo -u postgres vacuumdb --all --analyze-only >/dev/null 2>&1 &
+sudo -u postgres vacuumdb --all --freeze >/dev/null 2>&1 &
+
+# =========================
+# SUMMARY
+# =========================
+echo "======================================"
+echo "✅ PostgreSQL 17 Upgrade Complete"
+echo "======================================"
+echo "Data directory : $NEW_DATADIR"
+echo "Log directory  : $LOG_DIR"
+echo "Archive dir    : $ARCHIVE_DIR"
+echo "Backup         : $BACKUP_PATH"
+echo
+echo "After testing:"
+echo " cd $UPGRADE_DIR && sudo -u postgres bash delete_old_cluster.sh"
