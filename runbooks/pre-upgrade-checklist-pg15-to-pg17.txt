@@ -1,0 +1,187 @@
+###############################################################################
+# POSTGRESQL 15 → 17 PRE-UPGRADE ACTIVITIES
+# (Pre-check note before running upgrade script)
+###############################################################################
+
+# 1. Allow postgres OS user local connection
+# ------------------------------------------------
+# Verify pg_hba.conf contains:
+#
+# local   all     postgres     trust
+#
+# Required because upgrade commands run as postgres user.
+
+
+# 2. Verify postgres role privileges
+# ------------------------------------------------
+# Ensure postgres role has LOGIN and SUPERUSER:
+#
+# ALTER USER postgres WITH SUPERUSER LOGIN;
+#
+# Required for:
+# - pg_upgrade
+# - backups
+# - settings extraction
+# - configuration changes
+
+
+# 3. Upload and prepare upgrade script
+# ------------------------------------------------
+# Upload script and make executable:
+#
+# chmod +x POSTGRES_UPGRADE_15_T0_17_final.sh
+#
+# NOTE:
+# Script must be executed as ROOT.
+
+
+# 4. Validate script configuration (MANDATORY)
+# ------------------------------------------------
+# Confirm these values match server layout:
+#
+# OLD_VERSION=15
+# NEW_VERSION=17
+#
+# OLD_DATADIR="/u01/postgres15"
+# NEW_DATADIR="/u01/postgres17"
+#
+# OLD_BINDIR="/usr/lib/postgresql/15/bin"
+# NEW_BINDIR="/usr/lib/postgresql/17/bin"
+#
+# CONF_DIR="/etc/postgresql/17/main"
+#
+# LOG_DIR="/u02/postgres17_log"
+# ARCHIVE_DIR="/u02/postgres17_archive"
+#
+# BACKUP_DIR="/u02/basebackups"
+# BACKUP_USER="backup_user"
+#
+# SETTINGS_DUMP="/tmp/pg15_custom_settings.conf"
+# REPORT_FILE="/tmp/pg_upgrade_report_$(date +%F_%H%M).txt"
+
+
+# 5. VERIFY INTERNET ACCESS (REQUIRED)
+# ------------------------------------------------
+# Script installs PostgreSQL 17 packages.
+# Ensure server has internet access:
+#
+# ping -c 3 google.com
+#
+# OR
+#
+# apt-get update
+#
+# Upgrade must NOT start without connectivity.
+
+
+# 6. UPGRADE MODE REQUIREMENT (COPY MODE ONLY)
+# ------------------------------------------------
+# Upgrade MUST run in COPY mode.
+# --link option must NOT be used.
+#
+# Reason:
+# - COPY mode creates independent data files.
+# - PG15 cluster remains untouched.
+# - Safe rollback possible.
+#
+# Why NOT --link:
+# - PG15 and PG17 share files.
+# - Changes in PG17 affect PG15.
+# - Rollback becomes unsafe.
+#
+# COPY mode is mandatory when rollback planning exists.
+
+
+# 7. VERIFY pg_upgrade COMMAND (NO --link)
+# ------------------------------------------------
+# Upgrade section must be EXACTLY:
+
+# CHECK PHASE
+#
+# sudo -u postgres "$NEW_BINDIR/pg_upgrade" \
+#  --old-datadir "$OLD_DATADIR" \
+#  --new-datadir "$NEW_DATADIR" \
+#  --old-bindir "$OLD_BINDIR" \
+#  --new-bindir "$NEW_BINDIR" \
+#  --check
+#
+# REAL UPGRADE (COPY MODE)
+#
+# sudo -u postgres "$NEW_BINDIR/pg_upgrade" \
+#  --old-datadir "$OLD_DATADIR" \
+#  --new-datadir "$NEW_DATADIR" \
+#  --old-bindir "$OLD_BINDIR" \
+#  --new-bindir "$NEW_BINDIR"
+#
+# IMPORTANT:
+# There must be NO --link option anywhere.
+
+
+# 8. SENIOR DBA SAFETY CHECK (AUTO BLOCK LINK MODE)
+# ------------------------------------------------
+# Before running upgrade, verify script does NOT contain --link:
+#
+# grep -n -- "--link" POSTGRES_UPGRADE_15_T0_17_final.sh
+#
+# Expected result:
+# (NO OUTPUT)
+#
+# If output appears:
+# ❌ STOP — script still uses link mode.
+#
+# Optional strict check (recommended):
+#
+# if grep -q -- "--link" POSTGRES_UPGRADE_15_T0_17_final.sh; then
+#   echo "ERROR: --link mode detected. Upgrade blocked."
+#   exit 1
+# fi
+#
+# This prevents human mistakes before production upgrades.
+
+
+# 9. Pre-upgrade validations
+# ------------------------------------------------
+# Confirm:
+# - PostgreSQL 15 running normally
+# - Enough disk space available:
+#     * base backup
+#     * new data directory
+#     * upgrade temp files
+# - No heavy maintenance jobs running
+# - Replication architecture documented
+
+
+# 10. Safety features already included in script
+# ------------------------------------------------
+# Script automatically performs:
+# - physical backup (pg_basebackup)
+# - settings extraction
+# - compatibility check
+# - automatic rollback on failure
+# - pg_hba.conf migration
+# - health validation
+#
+# Do NOT remove PG15 cluster until validation complete.
+
+
+# 11. Execute upgrade
+# ------------------------------------------------
+#
+# sudo bash POSTGRES_UPGRADE_15_T0_17_final.sh
+#
+# Upgrade report:
+# /tmp/pg_upgrade_report_<date_time>.txt
+
+
+# 12. Post-upgrade validation
+# ------------------------------------------------
+# - Validate application connectivity
+# - Check replication status
+# - Verify logging and archive directories
+# - Review performance settings
+# - Monitor ANALYZE and VACUUM background jobs
+
+
+###############################################################################
+# END OF PRE-UPGRADE NOTE
+###############################################################################
