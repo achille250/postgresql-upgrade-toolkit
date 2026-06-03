@@ -68,9 +68,3 @@ sudo ./scripts/1.POSTGRES_UPGRADE_15_T0_17_final.sh
 | [postgresql-ha-replication](https://github.com/achille250/postgresql-ha-replication) | Replica setup & failover |
 | [postgresql-data-migration](https://github.com/achille250/postgresql-data-migration) | Data migration after upgrade |
 | [postgresql-performance-tuning](https://github.com/achille250/postgresql-performance-tuning) | Post-upgrade tuning |
-
----
-
-## License
-
-MIT — see [LICENSE](LICENSE).
